@@ -10,50 +10,46 @@ from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher import FSMContext
-#from apscheduler.schedulers.background import BackgroundScheduler
 import config
-#import asyncio
+
 
 bot = Bot(token = config.token)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
 
-### парсинг цен
+### ПАРСИНГ КАРТОЧКИ ТОВАРА
 def parse_wb(url):
     opts = Options()
-    opts.headless = False
+    opts.headless = True
     driver = webdriver.Firefox(executable_path='C:\\Users\\vache\\PycharmProjects\\parser_selenium\\firefoxdriver\\geckodriver.exe', options=opts)
     try:
         driver.get(url = url)
         time.sleep(3)
+        driver.get_screenshot_as_file('test.png')
     except Exception as ex:
         print(ex)
     else:
+        # получаем наименование
+        search_name = driver.find_element(By.CLASS_NAME, 'product-page__header')
+        result_name = search_name.text
         try:
-            # получаем цену и наименование
-            search_price = driver.find_element(By.CLASS_NAME, 'price-block__final-price')
-            count_price = re.sub(r'\D', '', search_price.text)
-            #print(search_price.text)
-            search_name = driver.find_element(By.CLASS_NAME, 'product-page__header')
-            result_name = search_name.text
+            # получаем цену
+            search_price = driver.find_elements(By.CLASS_NAME, 'price-block__final-price')
+            count_price = re.sub(r'\D', '', search_price[1].text)
         except:
             # если цену не получили, проверка наличия товара
-            search_out_product = driver.find_element(By.CLASS_NAME, 'sold-out-product__text')
-            count_price = search_out_product.text
-            #
-
-            search_name = driver.find_element(By.CLASS_NAME, 'product-page__header')
-            result_name = search_name.text
+            search_out_element = driver.find_element(By.CLASS_NAME, 'sold-out-product__text')
+            count_price = 'Нет в наличии'
+        result = [result_name, count_price]
     finally:
         driver.close()
         driver.quit()
-    result = [result_name, count_price]
     print(result)
     return result
 
 
-### ЗАПИСЬ ССЫЛОК В БАЗУ И ЦЕНЫ ТОВАРА
+### ЗАПИСЬ ССЫЛОК И ЦЕНЫ ТОВАРА В БАЗУ
 def write_data(productlink, price, user_id):
     try:
         conn = psycopg2.connect(dbname=config.dbname, user=config.user,
@@ -90,7 +86,6 @@ def add_link(url, user_id):
     if result_parse[1] == 'Нет в наличии':
         return 0, result_parse[0]
     else:
-        write_data(url, result_parse[1], user_id)
         return 1, result_parse[0]
 
 ### БОТ
@@ -105,7 +100,7 @@ async def start_command(message: types.Message):
     keyboard.add(button1)
     await message.answer('Привет) Этот бот поможет тебе следить за снижением цены на понравившийся тебе товар на wildberries.')
     time.sleep(1)
-    await message.answer('Просто нажми на кнопку Добавить товар)', reply_markup=keyboard)
+    await message.answer('Нажми на кнопку Добавить товар)', reply_markup=keyboard)
 
 
 ### Кнопка добавить товар
@@ -136,6 +131,18 @@ async def parser_url(message: types.Message, state: FSMContext):
     elif answer[0] == 0:
         await message.answer('Товара ' + answer[1] + ' нет в наличии. Выберите другой товар.')
 
+### Сообщение пользователю
+def send_message(user_id, last_price, new_price, ProductLink, name_product):
+    if new_price < last_price:
+        text1 = 'Цена снизилась. Пока покупать)'
+        text2 = name_product + '\n' +last_price + ' -> ' + new_price + '\n' + ProductLink
+    else:
+        text1 = 'Цена выросла.'
+        text2 = name_product + '\n' +last_price + ' -> ' + new_price + '\n' + ProductLink
+    asyncio.create_task(bot.send_message(chat_id=user_id, text=text1))
+    time.sleep(1)
+    asyncio.create_task(bot.send_message(chat_id=user_id, text=text2))
+
 
 ### ОБНОВЛЕНИЕ ЦЕН В БАЗЕ
 async def update_price(wait_for):
@@ -147,7 +154,6 @@ async def update_price(wait_for):
         cursor_links = conn.cursor()
         cursor_links.execute("""SELECT link_id, link_url FROM links""")
         rows_url = cursor_links.fetchall()
-        #print(rows)
         cursor_links.close()
         if len(rows_url) > 0:
             for row in rows_url:
@@ -166,6 +172,8 @@ async def update_price(wait_for):
 
                 # если есть в наличии
                 else:
+                    conn = psycopg2.connect(dbname=config.dbname, user=config.user,
+                                            password=config.password, host=config.host)
                     cursor_prices = conn.cursor()
                     cursor_prices.execute("""SELECT price FROM prices WHERE link_id = %s ORDER BY date DESC LIMIT 1""",
                                           (link_id,))
@@ -185,9 +193,9 @@ async def update_price(wait_for):
                         if cursor_prices.rowcount > 0:
                             rows_users_id = cursor_prices.fetchall()
                             conn.close()
-                            text = 'Цена на ' + name_product + 'изменилась. Сейчас стоит: ' + str(new_price)
+                            print(rows_users_id)
                             for user_id in rows_users_id:
-                                asyncio.create_task(bot.send_message(chat_id=user_id, text=text))
+                                send_message(int(user_id[0]), str(last_price), str(new_price), ProductLink, name_product)
                     cursor_prices.close()
                 time.sleep(1)
         time.sleep(1)
@@ -195,6 +203,6 @@ async def update_price(wait_for):
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
-    loop.create_task((update_price(100)))
+    loop.create_task((update_price(240.0)))
     executor.start_polling(dp, skip_updates=True)
 
